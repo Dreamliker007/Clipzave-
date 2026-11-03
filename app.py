@@ -4,8 +4,11 @@ import tempfile
 from pathlib import Path
 from urllib.parse import urlparse
 
-from flask import Flask, jsonify, render_template, request, send_file
+from flask import Flask, after_this_request, jsonify, render_template, request, send_file
 from yt_dlp import YoutubeDL
+import instaloader
+import zipfile
+import shutil
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024
@@ -67,8 +70,42 @@ def download():
             mimetype="application/octet-stream",
             max_age=0,
         )
-    except Exception:
-        return jsonify(error="Could not fetch this media. It may be private, unavailable, age-restricted, or blocked by Instagram. Try a public post or Reel you own or have permission to download."), 422
+    except Exception as video_error:
+        # Instagram photo posts and carousels may not contain a video stream.
+        # Use Instaloader's public-post metadata path for image-only /p/ posts.
+        if re.search(r"no video|does not contain a video", str(video_error), re.I) and re.match(r"^/p/", urlparse(url).path):
+            image_dir = tempfile.mkdtemp(prefix="clipzave_images_")
+            try:
+                shortcode = urlparse(url).path.strip("/").split("/")[1]
+                loader = instaloader.Instaloader(
+                    dirname_pattern=image_dir,
+                    filename_pattern="{shortcode}_{mediaid}",
+                    download_pictures=True,
+                    download_videos=False,
+                    download_video_thumbnails=False,
+                    save_metadata=False,
+                    compress_json=False,
+                    post_metadata_txt_pattern="",
+                    quiet=True,
+                )
+                post = instaloader.Post.from_shortcode(loader.context, shortcode)
+                if not post.is_video:
+                    loader.download_post(post, target="post")
+                images = [p for p in Path(image_dir).rglob("*") if p.is_file() and p.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}]
+                if not images:
+                    raise RuntimeError("No public images were returned for this post.")
+                archive = Path(image_dir) / "clipzave-images.zip"
+                with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
+                    for image_path in images:
+                        zf.write(image_path, arcname=image_path.name)
+                @after_this_request
+                def cleanup_image_files(response):
+                    shutil.rmtree(image_dir, ignore_errors=True)
+                    return response
+                return send_file(archive, as_attachment=True, download_name="clipzave-images.zip", mimetype="application/zip", max_age=0)
+            except Exception:
+                shutil.rmtree(image_dir, ignore_errors=True)
+        return jsonify(error="Could not fetch this public media. Instagram may require access or may be rate-limiting the request. Only publicly accessible content you own or have permission to save is supported."), 422
 
 
 @app.get("/health")
