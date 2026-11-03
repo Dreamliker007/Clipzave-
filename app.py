@@ -24,7 +24,11 @@ def valid_instagram_url(value: str) -> bool:
     host = (parsed.hostname or "").lower()
     if host not in ALLOWED_HOSTS:
         return False
-    return bool(re.match(r"^/(reel|p|tv)/[A-Za-z0-9_-]+/?$", parsed.path))
+    path = parsed.path
+    return bool(
+        re.match(r"^/(reel|p|tv)/[A-Za-z0-9_-]+/?$", path)
+        or re.match(r"^/stories/[A-Za-z0-9._]+/[0-9]+/?$", path)
+    )
 
 
 def public_post(url: str):
@@ -43,17 +47,18 @@ def preview():
     payload = request.get_json(silent=True) or {}
     url = (payload.get("url") or "").strip()
     if not valid_instagram_url(url):
-        return jsonify(error="Paste a valid public Instagram Reel or post link."), 400
+        return jsonify(error="Paste a valid Instagram Reel, post, or Story link."), 400
 
     try:
         options = {"quiet": True, "no_warnings": True, "noplaylist": True, "skip_download": True, "socket_timeout": 20}
         with YoutubeDL(options) as ydl:
             info = ydl.extract_info(url, download=False)
+        is_story = urlparse(url).path.startswith("/stories/")
         return jsonify({
-            "title": info.get("title") or "Instagram media",
+            "title": info.get("title") or ("Instagram Story" if is_story else "Instagram media"),
             "thumbnail": info.get("thumbnail"),
             "duration": info.get("duration"),
-            "media_type": "Video" if info.get("duration") or info.get("is_live") else "Instagram post",
+            "media_type": "Story" if is_story else ("Video" if info.get("duration") or info.get("is_live") else "Instagram post"),
             "items": 1
         })
     except Exception:
@@ -68,6 +73,8 @@ def preview():
                 return jsonify({"title": (post.caption or "Instagram photo post")[:120], "thumbnail": first_image, "duration": None, "media_type": "Photo carousel" if len(images) > 1 else "Photo", "items": len(images)})
             except Exception:
                 pass
+        if urlparse(url).path.startswith("/stories/"):
+            return jsonify(error="Could not access this Story. Instagram often requires an authorized session for Stories; private, expired, or login-protected Stories cannot be fetched here."), 422
         return jsonify(error="Could not preview this link. Instagram may be rate-limiting it or the post may not be publicly accessible."), 422
 
 
@@ -76,7 +83,7 @@ def download():
     payload = request.get_json(silent=True) or {}
     url = (payload.get("url") or "").strip()
     if not valid_instagram_url(url):
-        return jsonify(error="Enter a valid public Instagram Reel or post link. Stories and private content are not supported."), 400
+        return jsonify(error="Enter a valid Instagram Reel, post, or Story link."), 400
 
     temp_dir = tempfile.mkdtemp(prefix="clipzave_")
     output_template = str(Path(temp_dir) / "%(title).80s-%(id)s.%(ext)s")
@@ -127,6 +134,8 @@ def download():
             except Exception:
                 shutil.rmtree(image_dir, ignore_errors=True)
         shutil.rmtree(temp_dir, ignore_errors=True)
+        if urlparse(url).path.startswith("/stories/"):
+            return jsonify(error="Could not download this Story. Instagram may require an authorized session, or the Story may be private, expired, or restricted. ClipZave does not bypass Instagram access controls."), 422
         return jsonify(error="Could not fetch this public media. Instagram may require access or may be rate-limiting the request. Only publicly accessible content you own or have permission to save is supported."), 422
 
 
