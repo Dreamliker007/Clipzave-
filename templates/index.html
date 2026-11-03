@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#10121b">
+  <meta name="description" content="ClipZave helps you save public Instagram Reels and posts you own or have permission to download.">
+  <title>ClipZave — Save public Instagram media</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="ClipZave home"><span class="brand-mark">C</span> Clip<span>Zave</span></a>
+    <span class="top-note">PUBLIC MEDIA TOOL</span>
+  </header>
+  <main>
+    <section class="hero">
+      <div class="eyebrow"><span></span> SIMPLE · FAST · FREE TO TRY</div>
+      <h1>Your favourite moments.<br><span>Saved with ease.</span></h1>
+      <p class="sub">Paste a public Instagram Reel or post link to get started.</p>
+      <div class="download-card">
+        <label for="url">Instagram link</label>
+        <div class="input-row">
+          <input id="url" type="url" placeholder="https://www.instagram.com/reel/..." autocomplete="url">
+          <button id="downloadBtn">Get media <span>→</span></button>
+        </div>
+        <p id="status" class="status" role="status">No login required. Public posts and Reels only.</p>
+      </div>
+      <div class="trust-row"><span>✓ No account needed</span><span>✓ Mobile friendly</span><span>✓ No private content</span></div>
+    </section>
+    <section class="how">
+      <h2>How it works</h2>
+      <div class="steps">
+        <article><b>01</b><h3>Copy a link</h3><p>Copy the URL of a public Instagram Reel or post.</p></article>
+        <article><b>02</b><h3>Paste it here</h3><p>Paste the link into the box above and select Get media.</p></article>
+        <article><b>03</b><h3>Save your file</h3><p>If the post is publicly accessible, your file will be prepared.</p></article>
+      </div>
+    </section>
+    <p class="legal">Use only for content you created or have permission to save. ClipZave is an independent tool and is not affiliated with Instagram or Meta. Private posts, Stories, login-protected media and restricted content are not supported.</p>
+  </main>
+  <footer>© <span id="year"></span> ClipZave · Save responsibly.</footer>
+  <script>
+    const button = document.getElementById('downloadBtn');
+    const input = document.getElementById('url');
+    const statusEl = document.getElementById('status');
+    document.getElementById('year').textContent = new Date().getFullYear();
+    button.addEventListener('click', async () => {
+      const url = input.value.trim();
+      if (!url) { statusEl.textContent = 'Paste an Instagram link first.'; input.focus(); return; }
+      button.disabled = true;
+      button.textContent = 'Preparing…';
+      statusEl.textContent = 'Checking the public link. Please wait…';
+      try {
+        const response = await fetch('/api/download', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({url})
+        });
+        const type = response.headers.get('content-type') || '';
+        if (!response.ok) {
+          const data = type.includes('application/json') ? await response.json() : {};
+          throw new Error(data.error || 'Unable to prepare this media.');
+        }
+        const blob = await response.blob();
+        const disposition = response.headers.get('content-disposition') || '';
+        const match = disposition.match(/filename="?([^";]+)"?/i);
+        const filename = match ? match[1] : 'clipzave-media.mp4';
+        const objectUrl = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = objectUrl; a.download = filename; document.body.appendChild(a); a.click(); a.remove();
+        URL.revokeObjectURL(objectUrl);
+        statusEl.textContent = 'Your download is ready.';
+      } catch (error) {
+        statusEl.textContent = error.message;
+      } finally {
+        button.disabled = false;
+        button.innerHTML = 'Get media <span>→</span>';
+      }
+    });
+  </script>
+</body>
+</html>
