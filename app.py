@@ -3,10 +3,12 @@ import re
 import tempfile
 from pathlib import Path
 from urllib.parse import urlparse
+from http.cookiejar import MozillaCookieJar
 import zipfile
 import shutil
+import hmac
 
-from flask import Flask, after_this_request, jsonify, render_template, request, send_file
+from flask import Flask, after_this_request, jsonify, make_response, render_template, request, send_file
 from yt_dlp import YoutubeDL
 import instaloader
 
@@ -15,6 +17,70 @@ app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024
 
 ALLOWED_HOSTS = {"instagram.com", "www.instagram.com", "m.instagram.com"}
 URL_RE = re.compile(r"^https?://", re.I)
+
+
+def instagram_configuration_error():
+    cookies_file = os.environ.get("INSTAGRAM_COOKIES_FILE", "").strip()
+    username = os.environ.get("INSTAGRAM_USERNAME", "").strip()
+    if bool(username) != bool(cookies_file):
+        return "Set both INSTAGRAM_USERNAME and INSTAGRAM_COOKIES_FILE to enable Instagram session access."
+    if cookies_file and not Path(cookies_file).is_file():
+        return "The configured Instagram cookies file is missing from the server."
+    if cookies_file:
+        try:
+            jar = MozillaCookieJar(cookies_file)
+            jar.load(ignore_discard=True, ignore_expires=True)
+            cookie_names = {
+                cookie.name for cookie in jar
+                if cookie.domain.lstrip(".").lower() == "instagram.com"
+                or cookie.domain.lstrip(".").lower().endswith(".instagram.com")
+            }
+            if not {"sessionid", "csrftoken"}.issubset(cookie_names):
+                return "The Instagram cookies file must include a current sessionid and csrftoken."
+        except (OSError, ValueError):
+            return "The configured Instagram cookies file is invalid."
+    return None
+
+
+def youtube_dl_options(options):
+    cookies_file = os.environ.get("INSTAGRAM_COOKIES_FILE", "").strip()
+    if cookies_file:
+        options["cookiefile"] = cookies_file
+    return options
+
+
+def create_instaloader(**options):
+    loader = instaloader.Instaloader(**options)
+    username = os.environ.get("INSTAGRAM_USERNAME", "").strip()
+    cookies_file = os.environ.get("INSTAGRAM_COOKIES_FILE", "").strip()
+    if username and cookies_file:
+        jar = MozillaCookieJar(cookies_file)
+        jar.load(ignore_discard=True, ignore_expires=True)
+        cookies = {
+            cookie.name: cookie.value for cookie in jar
+            if cookie.domain.lstrip(".").lower() == "instagram.com"
+            or cookie.domain.lstrip(".").lower().endswith(".instagram.com")
+        }
+        loader.load_session(username, cookies)
+    return loader
+
+
+@app.before_request
+def require_access_password():
+    if request.endpoint == "health":
+        return None
+
+    expected_password = os.environ.get("CLIPZAVE_ACCESS_PASSWORD", "")
+    if not expected_password:
+        return jsonify(error="ClipZave access password is not configured."), 503
+
+    auth = request.authorization
+    if auth and auth.username == "clipzave" and hmac.compare_digest(auth.password or "", expected_password):
+        return None
+
+    response = make_response("Authentication required.", 401)
+    response.headers["WWW-Authenticate"] = 'Basic realm="ClipZave", charset="UTF-8"'
+    return response
 
 
 def valid_instagram_url(value: str) -> bool:
@@ -33,7 +99,7 @@ def valid_instagram_url(value: str) -> bool:
 
 def public_post(url: str):
     shortcode = urlparse(url).path.strip("/").split("/")[-1]
-    loader = instaloader.Instaloader(quiet=True)
+    loader = create_instaloader(quiet=True)
     return instaloader.Post.from_shortcode(loader.context, shortcode)
 
 
@@ -53,9 +119,12 @@ def preview():
     url = (payload.get("url") or "").strip()
     if not valid_instagram_url(url):
         return jsonify(error="Paste a valid Instagram Reel, post, or Story link."), 400
+    config_error = instagram_configuration_error()
+    if config_error:
+        return jsonify(error=config_error), 503
 
     try:
-        options = {"quiet": True, "no_warnings": True, "noplaylist": True, "skip_download": True, "socket_timeout": 20}
+        options = youtube_dl_options({"quiet": True, "no_warnings": True, "noplaylist": True, "skip_download": True, "socket_timeout": 20})
         with YoutubeDL(options) as ydl:
             info = ydl.extract_info(url, download=False)
         is_story = urlparse(url).path.startswith("/stories/")
@@ -107,6 +176,9 @@ def download():
     url = (payload.get("url") or "").strip()
     if not valid_instagram_url(url):
         return jsonify(error="Enter a valid Instagram Reel, post, or Story link."), 400
+    config_error = instagram_configuration_error()
+    if config_error:
+        return jsonify(error=config_error), 503
 
     selected_images = payload.get("selected_images")
     if selected_images is not None:
@@ -131,7 +203,7 @@ def download():
 
         image_dir = tempfile.mkdtemp(prefix="clipzave_selected_images_")
         try:
-            loader = instaloader.Instaloader(
+            loader = create_instaloader(
                 dirname_pattern=image_dir, filename_pattern="{shortcode}_{mediaid}",
                 download_pictures=True, download_videos=False, download_video_thumbnails=False,
                 save_metadata=False, compress_json=False, post_metadata_txt_pattern="", quiet=True,
@@ -165,11 +237,11 @@ def download():
 
     temp_dir = tempfile.mkdtemp(prefix="clipzave_")
     output_template = str(Path(temp_dir) / "%(title).80s-%(id)s.%(ext)s")
-    options = {
+    options = youtube_dl_options({
         "outtmpl": output_template, "format": "best[ext=mp4]/best", "noplaylist": True,
         "quiet": True, "no_warnings": True, "restrictfilenames": True,
         "max_filesize": 100 * 1024 * 1024, "socket_timeout": 20,
-    }
+    })
     try:
         with YoutubeDL(options) as ydl:
             info = ydl.extract_info(url, download=True)
@@ -189,7 +261,7 @@ def download():
             image_dir = tempfile.mkdtemp(prefix="clipzave_images_")
             try:
                 shortcode = urlparse(url).path.strip("/").split("/")[1]
-                loader = instaloader.Instaloader(
+                loader = create_instaloader(
                     dirname_pattern=image_dir, filename_pattern="{shortcode}_{mediaid}",
                     download_pictures=True, download_videos=False, download_video_thumbnails=False,
                     save_metadata=False, compress_json=False, post_metadata_txt_pattern="", quiet=True,
