@@ -2,6 +2,9 @@
 
 A small Flask web app for downloading publicly accessible Instagram Reels and posts that you own or have permission to save.
 
+Photo carousels show a gallery so you can choose which photos to include in the ZIP download.
+Use the Paste button to fill the link field from your clipboard.
+
 ## Run locally
 
 ```bash

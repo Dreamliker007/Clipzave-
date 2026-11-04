@@ -16,11 +16,15 @@
       <p class="sub">Paste an Instagram Reel, post, or Story link to preview it before saving.</p>
       <div class="download-card">
         <label for="url">Instagram link</label>
-        <div class="input-row"><input id="url" type="url" placeholder="https://www.instagram.com/reel/..." autocomplete="url"><button id="previewBtn">Preview media <span>→</span></button></div>
+        <div class="input-row"><input id="url" type="url" placeholder="https://www.instagram.com/reel/..." autocomplete="url"><button id="pasteBtn" class="paste-btn" type="button">Paste</button><button id="previewBtn" type="button">Preview media <span>→</span></button></div>
         <p id="status" class="status" role="status">Public Reels, posts and accessible Stories. Login-protected content is not supported.</p>
         <section id="previewCard" class="preview-card" hidden aria-live="polite">
           <div class="preview-image-wrap"><img id="previewImage" alt="Instagram media preview"><span id="mediaType" class="media-type">Video</span></div>
           <div class="preview-info"><h2 id="mediaTitle">Instagram media</h2><p id="mediaMeta"></p><button id="saveBtn" class="save-btn">Download <span>↓</span></button></div>
+        </section>
+        <section id="galleryCard" class="gallery-card" hidden aria-label="Choose carousel photos">
+          <div class="gallery-heading"><div><h3>Choose photos</h3><p>Selected photos will be saved in a ZIP file.</p></div><span id="gallerySelection" class="gallery-selection" aria-live="polite"></span></div>
+          <div id="galleryGrid" class="gallery-grid"></div>
         </section>
       </div>
       <div class="trust-row"><span>✓ No account needed</span><span>✓ Mobile friendly</span><span>✓ Public content only</span></div>
@@ -34,14 +38,32 @@
   </main>
   <footer>© <span id="year"></span> ClipZave · Save responsibly.</footer>
   <script>
-    const previewBtn=document.getElementById('previewBtn'), saveBtn=document.getElementById('saveBtn');
+    const previewBtn=document.getElementById('previewBtn'), pasteBtn=document.getElementById('pasteBtn'), saveBtn=document.getElementById('saveBtn');
     const input=document.getElementById('url'), statusEl=document.getElementById('status'), card=document.getElementById('previewCard');
+    const galleryCard=document.getElementById('galleryCard'), galleryGrid=document.getElementById('galleryGrid'), gallerySelection=document.getElementById('gallerySelection');
     let previewedUrl='';
     document.getElementById('year').textContent=new Date().getFullYear();
-    input.addEventListener('input',()=>{if(input.value.trim()!==previewedUrl)card.hidden=true;});
+    pasteBtn.addEventListener('click',async()=>{
+      if(!navigator.clipboard||!navigator.clipboard.readText){statusEl.textContent='Clipboard access is unavailable here. Paste the Instagram link into the field.';return;}
+      pasteBtn.disabled=true;pasteBtn.textContent='Reading…';
+      try{
+        const clipboardText=(await navigator.clipboard.readText()).trim();
+        if(!clipboardText){statusEl.textContent='Clipboard is empty. Copy an Instagram link first.';return;}
+        input.value=clipboardText;input.dispatchEvent(new Event('input',{bubbles:true}));input.focus();statusEl.textContent='Link pasted. Tap Preview media.';
+      }catch(error){
+        statusEl.textContent=error&&error.name==='NotAllowedError'?'Clipboard permission was denied. Paste the link into the field instead.':'Could not read the clipboard. Paste the link into the field instead.';
+      }finally{pasteBtn.disabled=false;pasteBtn.textContent='Paste';}
+    });
+    function updateGallerySelection(){
+      const checkboxes=galleryGrid.querySelectorAll('input[type="checkbox"]');
+      const selected=galleryGrid.querySelectorAll('input[type="checkbox"]:checked').length;
+      gallerySelection.textContent=selected+' of '+checkboxes.length+' selected';
+    }
+    galleryGrid.addEventListener('change',updateGallerySelection);
+    input.addEventListener('input',()=>{if(input.value.trim()!==previewedUrl){card.hidden=true;galleryCard.hidden=true;galleryGrid.replaceChildren();}});
     previewBtn.addEventListener('click',async()=>{
       const url=input.value.trim(); if(!url){statusEl.textContent='Paste an Instagram link first.';input.focus();return;}
-      previewBtn.disabled=true;previewBtn.textContent='Checking…';card.hidden=true;previewedUrl='';
+      previewBtn.disabled=true;previewBtn.textContent='Checking…';card.hidden=true;galleryCard.hidden=true;galleryGrid.replaceChildren();previewedUrl='';
       statusEl.textContent='Loading the public media preview…';
       try{
         const response=await fetch('/api/preview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url})});
@@ -52,15 +74,33 @@
         document.getElementById('mediaType').textContent=data.media_type||'Media';
         const duration=data.duration?Math.floor(data.duration/60)+':'+String(Math.floor(data.duration%60)).padStart(2,'0'):'';
         document.getElementById('mediaMeta').textContent=[data.media_type,data.items>1?data.items+' photos':null,duration].filter(Boolean).join(' · ');
+        const images=Array.isArray(data.images)?data.images:[];
+        if(images.length>1){
+          images.forEach((image,index)=>{
+            const item=document.createElement('label');item.className='gallery-item';
+            const thumbnail=document.createElement('img');thumbnail.src=image.url;thumbnail.alt='Carousel photo '+(index+1);thumbnail.loading='lazy';
+            const selection=document.createElement('span');selection.className='gallery-item-selection';
+            const checkbox=document.createElement('input');checkbox.type='checkbox';checkbox.checked=true;checkbox.value=String(image.index);
+            const label=document.createElement('span');label.textContent='Photo '+(index+1);
+            selection.append(checkbox,label);item.append(thumbnail,selection);galleryGrid.append(item);
+          });
+          galleryCard.hidden=false;updateGallerySelection();
+        }
         previewedUrl=url;card.hidden=false;statusEl.textContent='Preview loaded. Check it, then tap Download.';
+        if(images.length>1)statusEl.textContent='Choose the carousel photos to include, then tap Download.';
       }catch(error){statusEl.textContent=error.message;}
       finally{previewBtn.disabled=false;previewBtn.innerHTML='Preview media <span>→</span>';}
     });
     saveBtn.addEventListener('click',async()=>{
       const url=input.value.trim();if(!previewedUrl||url!==previewedUrl){statusEl.textContent='Preview the link again before downloading.';return;}
+      const payload={url};
+      if(!galleryCard.hidden){
+        payload.selected_images=Array.from(galleryGrid.querySelectorAll('input[type="checkbox"]:checked'),checkbox=>Number(checkbox.value));
+        if(!payload.selected_images.length){statusEl.textContent='Select at least one photo to download.';return;}
+      }
       saveBtn.disabled=true;saveBtn.textContent='Preparing download…';statusEl.textContent='Preparing your file…';
       try{
-        const response=await fetch('/api/download',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url})});
+        const response=await fetch('/api/download',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
         const type=response.headers.get('content-type')||'';
         if(!response.ok){const data=type.includes('application/json')?await response.json():{};throw new Error(data.error||'Unable to download this media.');}
         const blob=await response.blob(),disposition=response.headers.get('content-disposition')||'',match=disposition.match(/filename="?([^";]+)"?/i);
